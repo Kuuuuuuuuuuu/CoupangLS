@@ -1,0 +1,217 @@
+from langchain_community.chat_models import ChatOllama
+
+from langchain_core.output_parsers import StrOutputParser
+
+from langchain_core.prompts import ChatPromptTemplate
+
+from langchain_core.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+
+from langchain_core.callbacks.manager import CallbackManager
+
+
+
+llm = ChatOllama(
+
+    model="EEVE-Korean-10.8B:latest",
+
+    callback_manager=CallbackManager([StreamingStdOutCallbackHandler()]),
+
+)
+
+
+
+# Load model directly
+
+from transformers import AutoTokenizer
+
+from langchain.embeddings import HuggingFaceEmbeddings
+
+
+
+tokenizer = AutoTokenizer.from_pretrained("jhgan/ko-sroberta-multitask")
+
+embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+from langchain.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
+
+def load_and_split_documents(loaders):
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=100)
+
+    all_splits = []
+
+   
+
+    for loader in loaders:
+
+        pages = loader.load_and_split()
+
+        splits = text_splitter.split_documents(pages)
+
+        all_splits.extend(splits)
+
+   
+
+    return all_splits
+
+
+
+loaders = [
+
+    #PyPDFLoader('pdf파일 경로설정'),
+
+    TextLoader('C:/Users/RomainDHKuRecruiting/Romain/traning_set.txt', encoding='UTF8')
+
+]
+
+all_splits = load_and_split_documents(loaders)
+
+
+
+#from langchain.vectorstores import Chroma
+
+from langchain.vectorstores import FAISS
+
+
+
+vector = FAISS.from_documents(documents=all_splits, embedding=embedding_model)
+
+#vector = Chroma.from_documents(documents=all_splits, embedding=model)
+
+
+
+retriever = vector.as_retriever()
+
+
+
+from langchain.chains.combine_documents import create_stuff_documents_chain
+
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+# ### 질문에 대한 정의 ###
+
+contextualize_q_system_prompt = """Given a chat history and the latest user question \
+
+which might reference context in the chat history, formulate a standalone question \
+
+which can be understood without the chat history. Do NOT answer the question, \
+
+just reformulate it if needed and otherwise return it as is. \
+
+Always in Korean."""
+
+contextualize_q_prompt = ChatPromptTemplate.from_messages(
+
+    [
+
+        ("system", contextualize_q_system_prompt),
+
+        MessagesPlaceholder("chat_history"),
+
+        ("human", "{input}"),
+
+    ]
+
+)
+
+history_aware_retriever = create_history_aware_retriever(
+
+    llm, retriever, contextualize_q_prompt
+
+)
+
+
+
+# ### 질문에 대한 대답 ###
+
+qa_system_prompt = """You are an assistant for question-answering tasks. \
+
+Use the following pieces of retrieved context to answer the question. \
+
+If you don't know the answer, just say that you don't know. \
+
+Use three sentences maximum and keep the answer concise.\
+
+Always answer in Korean.\
+
+
+
+{context}"""
+
+qa_prompt = ChatPromptTemplate.from_messages(
+
+    [
+
+        ("system", qa_system_prompt),
+
+        MessagesPlaceholder("chat_history"),
+
+        ("human", "{input}"),
+
+    ]
+
+)
+
+
+
+question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+
+rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+
+
+from langchain_core.chat_history import BaseChatMessageHistory
+
+from langchain_community.chat_message_histories import ChatMessageHistory
+
+from langchain_core.runnables.history import RunnableWithMessageHistory
+
+#모든 세션정보 딕셔너리로 관리 key에는 sessionid, value에는 모든 히스토리 존재
+
+GHistorys = {}
+
+
+
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+
+    if session_id not in GHistorys:
+
+        GHistorys[session_id] = ChatMessageHistory()
+
+    return GHistorys[session_id]
+
+
+
+conversational_rag_chain = RunnableWithMessageHistory(
+
+    rag_chain,
+
+    get_session_history,
+
+    input_messages_key="input",
+
+    history_messages_key="chat_history",
+
+    output_messages_key="answer",
+
+)
+
+
+
+sessionQu = conversational_rag_chain.invoke(
+
+    {"input": "내가 이전에도 너한테 뭔가를 물어봤어?"},
+
+    config={
+
+        "configurable": {"session_id": "어떤 사용자인지 아이디 값 부여"}
+
+    },
+
+)
