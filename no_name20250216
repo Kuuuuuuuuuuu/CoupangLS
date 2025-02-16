@@ -1,0 +1,87 @@
+# 필요한 라이브러리 임포트
+from langchain_community.chat_models import ChatOllama
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.document_loaders import TextLoader  # 문서 로더
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from transformers import AutoTokenizer
+# ==============================
+# 1️⃣ LLM 및 임베딩 모델 설정
+# ==============================
+# LLM (Ollama 모델)
+llm = ChatOllama(
+   model="EEVE-Korean-10.8B:latest"
+)
+# 텍스트 임베딩 모델
+embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+# ==============================
+# 2️⃣ 문서 로드 및 벡터 저장소 구축
+# ==============================
+def load_and_split_documents(loaders):
+   """ 문서를 로드하고 청크 단위로 분할하는 함수 """
+   text_splitter = RecursiveCharacterTextSplitter(chunk_size=200, chunk_overlap=100)
+   all_splits = []
+   for loader in loaders:
+       pages = loader.load()  # 수정: load_and_split() → load()
+       splits = text_splitter.split_documents(pages)
+       all_splits.extend(splits)
+   return all_splits
+# 문서 로더 (예제: 텍스트 파일 로드)
+loaders = [
+   TextLoader("C:/Users/RomainDHKuRecruiting/Romain/training_set.txt", encoding="UTF8")
+]
+# 문서 로드 및 청크 생성
+all_splits = load_and_split_documents(loaders)
+# FAISS 벡터 저장소 구축
+vector_store = FAISS.from_documents(documents=all_splits, embedding=embedding_model)
+retriever = vector_store.as_retriever()
+# ==============================
+# 3️⃣ 검색 및 답변 생성 체인 구축
+# ==============================
+# 🔹 질문을 문맥을 고려하여 변환하는 프롬프트
+contextualize_q_prompt = ChatPromptTemplate.from_messages([
+   ("system", "대화 기록과 최신 사용자 질문을 바탕으로 독립적인 질문을 만드세요."),
+   MessagesPlaceholder("chat_history"),
+   ("human", "{input}")
+])
+history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+# 🔹 검색된 문서를 기반으로 답변을 생성하는 프롬프트
+qa_prompt = ChatPromptTemplate.from_messages([
+   ("system", "다음 정보를 이용하여 질문에 답변하세요. 답변을 모르면 '모르겠습니다.'라고 하세요.\n\n{context}"),
+   MessagesPlaceholder("chat_history"),
+   ("human", "{input}")
+])
+question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+# ==============================
+# 4️⃣ 사용자 세션 관리
+# ==============================
+# 세션별 대화 기록 저장
+GHistorys = {}
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+   """ 세션 ID별 대화 기록을 관리하는 함수 """
+   if session_id not in GHistorys:
+       GHistorys[session_id] = ChatMessageHistory()
+   return GHistorys[session_id]
+# ==============================
+# 5️⃣ 대화형 RAG 체인 실행
+# ==============================
+conversational_rag_chain = RunnableWithMessageHistory(
+   rag_chain,
+   get_session_history,
+   input_messages_key="input",
+   history_messages_key="chat_history",
+   output_messages_key="answer"
+)
+# 테스트 실행 (세션 ID 포함)
+session_response = conversational_rag_chain.invoke(
+   {"input": "내가 이전에도 너한테 뭔가를 물어봤어?"},
+   config={"configurable": {"session_id": "user_123"}}
+)
+print(session_response)
